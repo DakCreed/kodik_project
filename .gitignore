@@ -1,0 +1,27 @@
+# Пакеты OneScript, устанавливаемые через opm по packagedef
+oscript_modules/
+
+# Результаты сборки и выгрузки
+build/
+out/
+*.ospx
+*.cf
+*.cfe
+*.epf
+*.dt
+
+# Логи и временные файлы
+*.log
+tmp/
+temp/
+
+# Отчёты тестов и покрытия
+allure-results/
+build/out/
+coverage/
+
+# Служебные файлы ОС и редакторов
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
