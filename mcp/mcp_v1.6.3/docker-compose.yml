@@ -1,0 +1,246 @@
+
+services:
+
+  # Векторная база данных Qdrant
+  qdrant:
+    image: docker.f-pix.ru/mcp/qdrant:v1.15
+    container_name: qdrant
+    ports:
+      - "6333:6333" # REST API
+      - "6334:6334" # gRPC API
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__CLUSTER__ENABLED=false
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://qdrant:6333/healthz" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # Сервис векторизации (эмбеддингов)
+  embedding-service:
+    image: docker.f-pix.ru/mcp/embedding-service:v1.5.2
+    container_name: embedding-service
+    ports:
+      - "5000:5000"
+    # Для модели sergeyzh/BERTA volumes не требуется
+    # А для использования альтернативных моделей ембеддингов блок volumes лучше раскомментировать
+    #volumes: 
+    #  - ./embeddings/models:/root/.cache/huggingface/hub
+
+    # опциональный блок GPU, если есть GPU и на хосте установлен nvidia container toolkit
+    # https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Варианты моделей:
+      #intfloat/multilingual-e5-base | 768
+      #intfloat/multilingual-e5-small | 384
+      #Alibaba-NLP/gte-multilingual-base | 768
+      #Qwen/Qwen3-Embedding-0.6B | 1024
+      #ai-forever/FRIDA | 1536
+      #sergeyzh/BERTA | 768
+      #ai-sage/Giga-Embeddings-instruct | 2048 - очень тяжелая, только с GPU
+      - MODEL_NAME=sergeyzh/BERTA
+      - VEC_DIM=768
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://embedding-service:5000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s # Longer start period for model loading
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # Сервис загрузки данных в векторную БД
+  loader:
+    image: docker.f-pix.ru/mcp/loader:v1.6.2 # ОБНОВЛЕННАЯ ВЕРСИЯ
+    container_name: loader
+    ports:
+      - "8501:8501"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - EMBEDDING_SERVICE_URL=http://embedding-service:5000
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - ROW_BATCH_SIZE=200
+      - EMBEDDING_BATCH_SIZE=50
+    #- CONF_LANG=en  # опциональный параметр для замены русскоязычных на англоязычные наименования из справки синтакс-помощника
+    #- INCLUDE_EN_NAMES=true  # опциональный параметр для включения английских наименований из справки синтакс-помощника
+    depends_on:
+      - qdrant
+      - embedding-service
+    restart: unless-stopped
+    networks:
+      - mcp-network 
+
+  metadata-loader:
+    image: docker.f-pix.ru/mcp/metadata-loader:v1.6.0
+    container_name: metadata-loader
+    ports:
+      - "8502:8501"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - EMBEDDING_SERVICE_URL=http://embedding-service:5000
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - SRC_DIR=/data/src
+      - OUT_DIR=/data/out
+      - FILES_BATCH_SIZE=50
+      - EMBEDDING_BATCH_SIZE=25
+      - WATCHER_POLLING=${WATCHER_POLLING:-1}
+      - OMIT_EQUAL_SYNONYM=true # если синоним совпадает с именем, не включать его в JSON
+      - CONF_LANG=ru # язык конфигурации 1С: ru или en
+    volumes:
+      # Путь к XML-выгрузке 1С (с поддиректориями Configuration и Extensions).
+      # Задаётся в файле .env переменной SRC_1C_DIR - работает и в Windows, и в Linux.
+      - "${SRC_1C_DIR:?ne zadan SRC_1C_DIR - skopiruyte .env.example v .env}:/data/src:ro"
+      # Именованный том для сгенерированных JSON и базы хешей отслеживания изменений,
+      # иначе при пересоздании контейнера индексацию придётся повторять с нуля.
+      - metadata_out:/data/out
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # MCP Метаданные с RAG
+  mcp-metadata:
+    image: docker.f-pix.ru/mcp/mcp-metadata:v1.6.0
+    container_name: mcp-metadata
+    ports:
+      - "9001:9001"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - EMBEDDING_SERVICE_URL=http://embedding-service:5000
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - SERVER_PORT=9001
+    # - MCP_TRANSPORT=sse # по умолчанию http
+    # - TOPK_LITE_SEARCH_LIMIT=15 # по умолчанию 10
+    # - USE_HYBRID_SEARCH=true # по умолчанию отключен
+    depends_on:
+      - qdrant
+      - embedding-service
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://mcp-metadata:9001/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # MCP по справке синтакс-помощника с RAG
+  mcp-help:
+    image: docker.f-pix.ru/mcp/mcp-help:v1.6.2 # ОБНОВЛЕННАЯ ВЕРСИЯ
+    container_name: mcp-help
+    ports:
+      - "9092:8000"
+      - "9002:9002"
+    environment:
+      API_PORT: 8000
+      MCP_PORT: 9002
+      MCP_TRANSPORT: http
+      # Qdrant connection
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      COLLECTION_NAME_HELP: 1c_help_rag
+      # Embedding service 
+      EMBEDDING_SERVICE_URL: http://embedding-service:5000
+      DENSE_VECTOR_NAME_NAME: dense_name
+      DENSE_VECTOR_NAME_MIN_INFO: dense_min_info
+      SPARSE_VECTOR_NAME_FULL_INFO: sparse_full_info
+      SEARCH_LIMIT: 10
+      PREFETCH_LIMIT_MULTIPLIER: 3
+      EMBEDDING_REQUEST_TIMEOUT: 5
+    #CONF_LANG: en  # опциональный параметр для замены русскоязычных на англоязычные наименования из справки синтакс-помощника
+    #INCLUDE_EN_NAMES: true  # опциональный параметр для включения английских наименований из справки синтакс-помощника
+    depends_on:
+      - qdrant
+      - embedding-service
+    restart: unless-stopped
+    networks:
+      - mcp-network
+  
+  # MCP проверки синтаксиса 
+  mcp-bsl-checker:
+    image: docker.f-pix.ru/mcp/mcp-bsl-checker:v1.4
+    container_name: mcp-bsl-checker
+    ports:
+      - "9004:8000"
+    volumes:
+      # Проброс папки исходников 1С в контейнер (та же переменная, что и у metadata-loader)
+      - "${SRC_1C_DIR:?ne zadan SRC_1C_DIR - skopiruyte .env.example v .env}:/src:ro"
+      - ./bsl-ls/.bsl-language-server.json:/config/.bsl-language-server.json:ro # Прокидываем в контейнер файл конфигурации bsl language server
+    environment:
+      # --- Core settings ---
+      BSL_JAR_PATH: "bsl-ls/bsl-language-server-0.24.2-exec.jar" 
+      BSL_ONLY_ERRORS: 1 # "1" - показывать только ошибки / "0" - включая предупреждения и рекомендации
+      BSL_DIAGNOSTICS_TIMEOUT: 90.0
+
+      # --- LSP client tuning ---
+      BSL_LS_CONFIG_PATH: "/config/.bsl-language-server.json"
+      BSL_LS_DIAG_TIMEOUT: 90.0
+      BSL_LS_REQ_TIMEOUT: 15.0
+      BSL_LS_INIT_TIMEOUT: 180
+      BSL_LS_MIN_WAIT: 2.0
+      BSL_PREWARM_LSP: 1
+      BSL_LS_COMPUTE_TRIGGER: onSave
+      BSL_LS_DEBUG_IO: 0 # "0" или "1" - для более подробного логирования работы LSP
+
+      # --- Java memory tuning (optional) ---
+      # Пример значений: 256m, 512m, 1g. Если не заданы — игнорируются.
+      # BSL_JAVA_XMS: "4g"
+      # BSL_JAVA_XMX: "8g"
+
+      # --- Workspace / paths ---
+      # Обязательно совпадает с путём из volumes выше: MCP по нему сопоставляет
+      # присланный агентом путь к файлу с путём внутри контейнера.
+      HOST_WORKSPACE_DIR: "${SRC_1C_DIR}"
+      BSL_LS_WORKSPACE_DIR: "/src"
+      # Выполнять ли инициализацию рабочего пространства (долгий запуск, но более глубокие проверки)
+      BSL_SKIP_WORKSPACE_INIT: 1 # "1" - пропустить инициализацию, "0" - выполнять инициализацию
+
+      # --- MCP ---
+      MCP_TRANSPORT: "http" # "sse" или "http" для Streamable HTTP
+      MCP_MOUNT_PATH: "/bsl"
+      MCP_ENDPOINT_PATH: "/mcp"
+
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+# MCP-клиент для проверок и тестов 
+# (Отключил, потому что почти во всех сервисах и MCP реализован тестовый HTTP API)
+#mcp-inspector:
+#  image: ghcr.io/modelcontextprotocol/inspector:latest
+#  container_name: mcp-inspector
+#  ports:
+#    - "6274:6274"   # UI
+#    - "6277:6277"   # MCP Proxy
+#  environment:
+#    - DANGEROUSLY_OMIT_AUTH=true
+#    - HOST=0.0.0.0
+#  restart: unless-stopped
+#  networks:
+#    - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge
+
+volumes:
+  qdrant_storage:
+  metadata_out:

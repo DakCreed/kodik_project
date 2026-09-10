@@ -10,6 +10,22 @@ out/
 *.epf
 *.dt
 
+# Локальные переменные окружения (пути, адреса, параметры запуска)
+.env
+
+# Поставка MCP-серверов от Infostart: лицензионные материалы издателя
+# (документация, обработка выгрузки) не должны попадать в публичный репозиторий.
+# Исключения ниже - только наши собственные файлы настроек.
+mcp/*
+!mcp/DEPLOY-astra-linux.md
+!mcp/mcp_v1.6.3/
+mcp/mcp_v1.6.3/*
+!mcp/mcp_v1.6.3/docker-compose.yml
+!mcp/mcp_v1.6.3/.env.example
+!mcp/mcp_v1.6.3/bsl-ls/
+mcp/mcp_v1.6.3/bsl-ls/*
+!mcp/mcp_v1.6.3/bsl-ls/.bsl-language-server.json
+
 # Логи и временные файлы
 *.log
 tmp/

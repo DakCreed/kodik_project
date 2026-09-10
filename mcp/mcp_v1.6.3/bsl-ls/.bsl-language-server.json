@@ -1,0 +1,19 @@
+{
+  "$schema": "https://1c-syntax.github.io/bsl-language-server/configuration/schema.json",
+  "language": "ru",
+  "diagnostics": {
+    "computeTrigger": "onSave",
+    "parameters": {
+      "LineLength": {
+        "maxLineLength": 140
+      },
+      "MagicNumber": false,
+      "MethodSize": false,
+      "Typo": false,
+      "UnusedLocalVariable": false,
+      "DeprecatedMessage": false,
+      "CommentedCode": false,
+      "ConsecutiveEmptyLines": false
+    }
+  }
+}
